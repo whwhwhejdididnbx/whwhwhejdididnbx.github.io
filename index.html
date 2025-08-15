@@ -118,6 +118,11 @@
         filter: brightness(1.1);
     }
 
+    .btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+
     .game-screen {
         flex: 1;
         position: relative;
@@ -340,6 +345,32 @@
     .connecting { border: 2px solid #ffaa00; color: #ffaa00; }
     .disconnected { border: 2px solid #ff4444; color: #ff4444; }
 
+    .radar-dot {
+        position: absolute;
+        width: 6px;
+        height: 6px;
+        background: #ff4444;
+        border-radius: 50%;
+        transform: translate(-50%, -50%);
+        box-shadow: 0 0 8px #ff4444;
+    }
+
+    .ping-display {
+        position: absolute;
+        bottom: 10px;
+        right: 10px;
+        padding: 5px 10px;
+        background: rgba(0, 0, 0, 0.7);
+        border: 1px solid #00ff41;
+        border-radius: 5px;
+        font-size: 12px;
+    }
+
+    @keyframes hitMarkerFade {
+        0% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+        100% { opacity: 0; transform: translate(-50%, -50%) scale(1.2) translateY(-20px); }
+    }
+
     @media (max-width: 480px) {
         .lobby h1 { font-size: 2rem; }
         .btn { font-size: 14px; padding: 12px 25px; }
@@ -355,7 +386,7 @@
         <!-- 로비 화면 -->
         <div id="lobbyScreen" class="lobby">
             <h1>🎯 PUBG AR</h1>
-            <p>로그인 없는 P2P 배틀로얄</p>
+            <p>실시간 P2P 배틀로얄</p>
 
 ```
         <div class="name-display">
@@ -377,7 +408,7 @@
         <div style="margin-top: 30px; font-size: 13px; opacity: 0.7; line-height: 1.4;">
             <p>📱 스마트폰을 총처럼 들고 조준</p>
             <p>🎯 빨간 버튼으로 발사!</p>
-            <p>⚡ 완전 무료, 로그인 불필요</p>
+            <p>⚡ 실시간 멀티플레이</p>
         </div>
     </div>
 
@@ -416,7 +447,7 @@
         </div>
         
         <div class="btn-group">
-            <button class="btn btn-primary" onclick="startGame()" id="startGameBtn">
+            <button class="btn btn-primary" onclick="startGame()" id="startGameBtn" disabled>
                 🚀 게임 시작 (2명 이상)
             </button>
             <button class="btn btn-secondary" onclick="leaveRoom()">
@@ -438,11 +469,13 @@
                     <div class="health-fill" id="healthBar" style="width: 100%;"></div>
                 </div>
                 <div>🏆 킬: <span id="killDisplay">0</span></div>
+                <div>📋 탄약: <span id="ammoDisplay">30</span>/30</div>
             </div>
             
             <div class="hud-panel">
                 <div>👥 생존: <span id="aliveDisplay">0</span></div>
                 <div>📡 거리: <span id="nearestDistance">-</span>m</div>
+                <div>🔗 연결: <span id="connectedCount">0</span></div>
             </div>
         </div>
 
@@ -459,6 +492,10 @@
 
         <div class="distance-display" id="distanceInfo">
             조준 중: <span id="targetName">-</span>
+        </div>
+
+        <div class="ping-display" id="pingDisplay">
+            핑: <span id="pingValue">-</span>ms
         </div>
 
         <div class="controls">
@@ -493,27 +530,37 @@
 <script>
     // 게임 상태 관리
     let gameState = {
-        screen: 'lobby', // lobby, joinRoom, waiting, game
+        screen: 'lobby',
+        playerId: '',
         playerName: '',
         roomCode: '',
         isHost: false,
         health: 100,
         kills: 0,
         ammo: 30,
+        maxAmmo: 30,
         isReloading: false,
         position: { lat: 0, lng: 0, accuracy: 0 },
         orientation: { alpha: 0, beta: 0, gamma: 0 },
         players: new Map(),
         connections: new Map(),
         lastShot: 0,
-        gameStartTime: 0
+        gameStartTime: 0,
+        signaling: null,
+        gameLoop: null,
+        pingInterval: null
     };
 
-    // P2P 연결 설정
+    // WebSocket 시그널링 서버 (무료 WebSocket 서비스 사용)
+    const SIGNALING_SERVER = 'wss://ws.postman-echo.com/raw';
+
+    // ICE 서버 설정 (무료 STUN 서버)
     const rtcConfig = {
         iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' }
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun.services.mozilla.com' },
+            { urls: 'stun:stun.stunprotocol.org:3478' }
         ]
     };
 
@@ -528,8 +575,14 @@
         return `${adj}${noun}${num}`;
     }
 
+    // 고유 플레이어 ID 생성
+    function generatePlayerId() {
+        return Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
+    }
+
     // 초기화
     function init() {
+        gameState.playerId = generatePlayerId();
         gameState.playerName = generateRandomName();
         document.getElementById('playerNameDisplay').textContent = gameState.playerName;
         
@@ -540,18 +593,18 @@
                 timeout: 10000,
                 maximumAge: 60000
             });
+        } else {
+            handleLocationError({ message: '위치 정보를 지원하지 않습니다' });
         }
         
         // 디바이스 방향 권한 요청
         if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-            // iOS
             DeviceOrientationEvent.requestPermission().then(response => {
                 if (response === 'granted') {
                     window.addEventListener('deviceorientation', updateOrientation);
                 }
             });
         } else {
-            // Android
             window.addEventListener('deviceorientation', updateOrientation);
         }
         
@@ -561,6 +614,80 @@
                 e.preventDefault();
             }
         }, { passive: false });
+
+        // 시그널링 서버 연결 (방이 있을 때만)
+        // connectSignaling();
+    }
+
+    // 시그널링 서버 연결
+    function connectSignaling() {
+        try {
+            // 실제 구현에서는 적절한 WebSocket 서버를 사용해야 합니다
+            // 여기서는 Firebase Realtime Database나 Socket.io 서버를 권장합니다
+            gameState.signaling = new WebSocket('wss://echo.websocket.org');
+            
+            gameState.signaling.onopen = () => {
+                console.log('시그널링 서버 연결됨');
+                updateConnectionStatus('connected');
+            };
+
+            gameState.signaling.onmessage = (event) => {
+                handleSignalingMessage(JSON.parse(event.data));
+            };
+
+            gameState.signaling.onerror = (error) => {
+                console.error('시그널링 오류:', error);
+                updateConnectionStatus('disconnected');
+            };
+
+            gameState.signaling.onclose = () => {
+                console.log('시그널링 연결 종료');
+                updateConnectionStatus('disconnected');
+                
+                // 재연결 시도
+                setTimeout(connectSignaling, 3000);
+            };
+
+        } catch (error) {
+            console.error('시그널링 연결 실패:', error);
+            // 데모용으로 로컬 연결 시뮬레이션
+            simulateLocalConnection();
+        }
+    }
+
+    // 로컬 연결 시뮬레이션 (시그널링 서버 없이 테스트용)
+    function simulateLocalConnection() {
+        setTimeout(() => {
+            updateConnectionStatus('connected');
+        }, 1000);
+    }
+
+    // 시그널링 메시지 처리
+    function handleSignalingMessage(message) {
+        console.log('시그널링 메시지:', message);
+        
+        if (message.roomCode !== gameState.roomCode) return;
+
+        switch (message.type) {
+            case 'join-room':
+                handlePlayerJoin(message);
+                break;
+            case 'offer':
+                handleOffer(message);
+                break;
+            case 'answer':
+                handleAnswer(message);
+                break;
+            case 'ice-candidate':
+                handleIceCandidate(message);
+                break;
+            case 'leave-room':
+                handlePlayerLeave(message);
+                break;
+            case 'start-game':
+                handleGameStart(message);
+                break;
+        }
     }
 
     function updatePosition(position) {
@@ -574,7 +701,7 @@
 
     function handleLocationError(error) {
         console.log('위치 정보 오류:', error.message);
-        // 가상 위치 사용 (테스트용)
+        // 서울 중심부 근처의 랜덤 위치 생성 (테스트용)
         gameState.position = {
             lat: 37.5665 + (Math.random() - 0.5) * 0.01,
             lng: 126.9780 + (Math.random() - 0.5) * 0.01,
@@ -626,12 +753,26 @@
         document.getElementById('roomCodeDisplay').textContent = gameState.roomCode;
         showScreen('waiting');
         
+        // 시그널링 서버 연결
+        connectSignaling();
+        
         // 방장은 자신을 플레이어 목록에 추가
-        updatePlayersList([{
-            id: 'host',
+        const hostPlayer = {
+            id: gameState.playerId,
             name: gameState.playerName,
             isHost: true
-        }]);
+        };
+        updatePlayersList([hostPlayer]);
+
+        // 방 정보를 시그널링 서버에 전송
+        setTimeout(() => {
+            sendSignalingMessage({
+                type: 'create-room',
+                roomCode: gameState.roomCode,
+                playerId: gameState.playerId,
+                playerName: gameState.playerName
+            });
+        }, 1000);
     }
 
     // 방 참가 화면 표시
@@ -651,15 +792,177 @@
         gameState.roomCode = roomCode;
         gameState.isHost = false;
         
-        // 실제로는 P2P 연결을 시도해야 하지만, 데모를 위해 대기실로 이동
         document.getElementById('roomCodeDisplay').textContent = roomCode;
         showScreen('waiting');
         
-        // 가상의 다른 플레이어들 추가 (데모용)
-        updatePlayersList([
-            { id: 'host', name: '방장', isHost: true },
-            { id: 'me', name: gameState.playerName, isHost: false }
-        ]);
+        // 시그널링 서버 연결
+        connectSignaling();
+        
+        // 방 참가 요청
+        setTimeout(() => {
+            sendSignalingMessage({
+                type: 'join-room',
+                roomCode: gameState.roomCode,
+                playerId: gameState.playerId,
+                playerName: gameState.playerName
+            });
+        }, 1000);
+
+        // 데모용 플레이어 추가
+        setTimeout(() => {
+            updatePlayersList([
+                { id: 'host', name: '방장', isHost: true },
+                { id: gameState.playerId, name: gameState.playerName, isHost: false }
+            ]);
+        }, 2000);
+    }
+
+    // 시그널링 메시지 전송
+    function sendSignalingMessage(message) {
+        if (gameState.signaling && gameState.signaling.readyState === WebSocket.OPEN) {
+            gameState.signaling.send(JSON.stringify(message));
+        } else {
+            console.log('시그널링 서버 연결되지 않음, 메시지 무시:', message);
+        }
+    }
+
+    // WebRTC 연결 생성
+    function createPeerConnection(peerId) {
+        const peerConnection = new RTCPeerConnection(rtcConfig);
+        
+        // 데이터 채널 생성
+        const dataChannel = peerConnection.createDataChannel('game', {
+            ordered: false,
+            maxRetransmits: 3
+        });
+        
+        dataChannel.onopen = () => {
+            console.log(`${peerId}와 연결됨`);
+            updateConnectionStatus('connected');
+            updateConnectedCount();
+        };
+        
+        dataChannel.onclose = () => {
+            console.log(`${peerId} 연결 끊어짐`);
+            gameState.players.delete(peerId);
+            updateConnectedCount();
+            updateGameUI();
+        };
+        
+        dataChannel.onmessage = (event) => {
+            handlePeerMessage(JSON.parse(event.data), peerId);
+        };
+        
+        dataChannel.onerror = (error) => {
+            console.error(`${peerId} 데이터 채널 오류:`, error);
+            updateConnectionStatus('disconnected');
+        };
+        
+        // ICE 후보 처리
+        peerConnection.onicecandidate = (event) => {
+            if (event.candidate) {
+                sendSignalingMessage({
+                    type: 'ice-candidate',
+                    roomCode: gameState.roomCode,
+                    targetId: peerId,
+                    senderId: gameState.playerId,
+                    candidate: event.candidate
+                });
+            }
+        };
+        
+        // 원격 데이터 채널 처리
+        peerConnection.ondatachannel = (event) => {
+            const channel = event.channel;
+            channel.onmessage = (event) => {
+                handlePeerMessage(JSON.parse(event.data), peerId);
+            };
+            channel.onopen = () => {
+                console.log(`${peerId}로부터 데이터 채널 연결됨`);
+                updateConnectedCount();
+            };
+        };
+        
+        gameState.connections.set(peerId, { peerConnection, dataChannel });
+        return peerConnection;
+    }
+
+    // 피어 메시지 처리
+    function handlePeerMessage(message, peerId) {
+        const now = Date.now();
+        
+        switch (message.type) {
+            case 'position':
+                updatePlayerPosition(message.data, peerId);
+                break;
+            case 'shot':
+                handlePeerShot(message.data, peerId);
+                break;
+            case 'hit':
+                handlePeerHit(message.data);
+                break;
+            case 'death':
+                handlePlayerDeath(message.data, peerId);
+                break;
+            case 'ping':
+                sendPeerMessage(peerId, {
+                    type: 'pong',
+                    timestamp: message.timestamp
+                });
+                break;
+            case 'pong':
+                updatePing(now - message.timestamp);
+                break;
+        }
+    }
+
+    // 피어에게 메시지 전송
+    function sendPeerMessage(peerId, message) {
+        const connection = gameState.connections.get(peerId);
+        if (connection && connection.dataChannel && connection.dataChannel.readyState === 'open') {
+            try {
+                connection.dataChannel.send(JSON.stringify(message));
+            } catch (error) {
+                console.error(`${peerId}에게 메시지 전송 실패:`, error);
+            }
+        }
+    }
+
+    // 모든 피어에게 브로드캐스트
+    function broadcastMessage(message) {
+        gameState.connections.forEach((connection, peerId) => {
+            sendPeerMessage(peerId, message);
+        });
+    }
+
+    // 플레이어 위치 업데이트
+    function updatePlayerPosition(data, peerId) {
+        const existingPlayer = gameState.players.get(peerId) || {};
+        gameState.players.set(peerId, {
+            ...existingPlayer,
+            id: peerId,
+            name: data.playerName || existingPlayer.name || '알 수 없음',
+            position: data.position,
+            orientation: data.orientation,
+            health: data.health !== undefined ? data.health : existingPlayer.health || 100,
+            lastSeen: Date.now()
+        });
+    }
+
+    // 위치 정보 브로드캐스트
+    function broadcastPosition() {
+        if (gameState.screen === 'game') {
+            broadcastMessage({
+                type: 'position',
+                data: {
+                    playerName: gameState.playerName,
+                    position: gameState.position,
+                    orientation: gameState.orientation,
+                    health: gameState.health,
+                    timestamp: Date.now()
+                }
+            });
+        }
     }
 
     // 로비로 돌아가기
@@ -669,9 +972,28 @@
 
     // 방 나가기
     function leaveRoom() {
-        gameState.connections.forEach(conn => conn.close());
+        // P2P 연결 정리
+        gameState.connections.forEach((connection, peerId) => {
+            if (connection.peerConnection) {
+                connection.peerConnection.close();
+            }
+        });
         gameState.connections.clear();
         gameState.players.clear();
+        
+        // 시그널링 서버에 나가기 알림
+        sendSignalingMessage({
+            type: 'leave-room',
+            roomCode: gameState.roomCode,
+            playerId: gameState.playerId
+        });
+        
+        // 시그널링 연결 종료
+        if (gameState.signaling) {
+            gameState.signaling.close();
+            gameState.signaling = null;
+        }
+        
         showScreen('lobby');
     }
 
@@ -709,32 +1031,86 @@
 
     // 게임 시작
     function startGame() {
-        if (gameState.screen !== 'waiting') return;
+        if (gameState.screen !== 'waiting' || !gameState.isHost) return;
         
+        // 모든 플레이어에게 게임 시작 알림
+        sendSignalingMessage({
+            type: 'start-game',
+            roomCode: gameState.roomCode,
+            playerId: gameState.playerId
+        });
+        
+        // 게임 초기화
+        initializeGame();
+    }
+
+    // 게임 초기화
+    function initializeGame() {
         gameState.gameStartTime = Date.now();
         gameState.health = 100;
         gameState.kills = 0;
-        gameState.ammo = 30;
+        gameState.ammo = gameState.maxAmmo;
+        gameState.isReloading = false;
         
         showScreen('game');
-        
-        // 가상의 플레이어들 생성 (데모용)
-        for (let i = 1; i <= 3; i++) {
-            const virtualPlayer = {
-                id: `player_${i}`,
-                name: generateRandomName(),
-                health: 100,
-                position: {
-                    lat: gameState.position.lat + (Math.random() - 0.5) * 0.002,
-                    lng: gameState.position.lng + (Math.random() - 0.5) * 0.002
-                },
-                lastSeen: Date.now()
-            };
-            gameState.players.set(virtualPlayer.id, virtualPlayer);
-        }
-        
         updateGameUI();
         startGameLoop();
+        startPingCheck();
+    }
+
+    // 게임 루프 시작
+    function startGameLoop() {
+        gameState.gameLoop = setInterval(() => {
+            updateGameUI();
+            updateRadar();
+            broadcastPosition();
+            
+            // 오래된 플레이어 정리 (30초 이상 응답 없음)
+            const now = Date.now();
+            gameState.players.forEach((player, playerId) => {
+                if (now - player.lastSeen > 30000) {
+                    gameState.players.delete(playerId);
+                    const connection = gameState.connections.get(playerId);
+                    if (connection) {
+                        connection.peerConnection.close();
+                        gameState.connections.delete(playerId);
+                    }
+                }
+            });
+            
+            updateConnectedCount();
+            
+        }, 1000);
+    }
+
+    // 핑 체크 시작
+    function startPingCheck() {
+        gameState.pingInterval = setInterval(() => {
+            gameState.connections.forEach((connection, peerId) => {
+                if (connection.dataChannel && connection.dataChannel.readyState === 'open') {
+                    sendPeerMessage(peerId, {
+                        type: 'ping',
+                        timestamp: Date.now()
+                    });
+                }
+            });
+        }, 5000);
+    }
+
+    // 핑 업데이트
+    function updatePing(pingTime) {
+        document.getElementById('pingValue').textContent = Math.round(pingTime);
+    }
+
+    // 연결된 플레이어 수 업데이트
+    function updateConnectedCount() {
+        let connectedCount = 0;
+        gameState.connections.forEach(connection => {
+            if (connection.dataChannel && connection.dataChannel.readyState === 'open') {
+                connectedCount++;
+            }
+        });
+        document.getElementById('connectedCount').textContent = connectedCount;
     }
 
     // 게임 UI 업데이트
@@ -743,6 +1119,7 @@
         document.getElementById('healthBar').style.width = gameState.health + '%';
         document.getElementById('killDisplay').textContent = gameState.kills;
         document.getElementById('aliveDisplay').textContent = gameState.players.size + 1;
+        document.getElementById('ammoDisplay').textContent = gameState.ammo;
         
         // 플레이어 목록 업데이트
         const gamePlayersList = document.getElementById('gamePlayersList');
@@ -754,23 +1131,39 @@
         gameState.players.forEach(player => {
             const distance = calculateDistance(gameState.position, player.position);
             
-            if (distance < nearestDistance) {
+            if (distance < nearestDistance && player.health > 0) {
                 nearestDistance = distance;
                 nearestPlayer = player;
             }
             
             const playerItem = document.createElement('div');
             playerItem.className = 'player-item';
+            
+            const healthColor = player.health > 50 ? '#00ff41' : player.health > 20 ? '#ffaa00' : '#ff4444';
+            
             playerItem.innerHTML = `
-                <span>${player.name}</span>
-                <span>${Math.round(distance)}m</span>
+                <span style="color: ${player.health > 0 ? 'white' : '#666'}">
+                    ${player.name} ${player.health <= 0 ? '💀' : ''}
+                </span>
+                <span style="color: ${healthColor}">
+                    ${player.health > 0 ? Math.round(distance) + 'm' : '사망'}
+                </span>
             `;
             gamePlayersList.appendChild(playerItem);
         });
         
-        if (nearestPlayer) {
+        if (nearestPlayer && nearestDistance < Infinity) {
             document.getElementById('nearestDistance').textContent = Math.round(nearestDistance);
             document.getElementById('targetName').textContent = nearestPlayer.name;
+        } else {
+            document.getElementById('nearestDistance').textContent = '-';
+            document.getElementById('targetName').textContent = '-';
+        }
+
+        // 승리 조건 확인
+        const alivePlayers = Array.from(gameState.players.values()).filter(p => p.health > 0).length;
+        if (alivePlayers === 0 && gameState.health > 0) {
+            endGame('승리!', '🏆 축하합니다! 치킨을 획득했습니다!');
         }
     }
 
@@ -786,21 +1179,6 @@
         return R * c;
     }
 
-    // 게임 루프
-    function startGameLoop() {
-        gameState.gameLoop = setInterval(() => {
-            updateGameUI();
-            updateRadar();
-            
-            // AI 플레이어들 이동 (데모용)
-            gameState.players.forEach(player => {
-                player.position.lat += (Math.random() - 0.5) * 0.0001;
-                player.position.lng += (Math.random() - 0.5) * 0.0001;
-            });
-            
-        }, 1000);
-    }
-
     // 레이더 업데이트
     function updateRadar() {
         const radar = document.getElementById('radar');
@@ -808,31 +1186,51 @@
         dots.forEach(dot => dot.remove());
         
         gameState.players.forEach(player => {
+            if (player.health <= 0) return; // 사망한 플레이어는 표시하지 않음
+            
             const distance = calculateDistance(gameState.position, player.position);
             if (distance < 200) { // 200m 이내만 표시
                 const dot = document.createElement('div');
                 dot.className = 'radar-dot';
-                dot.style.cssText = `
-                    position: absolute;
-                    width: 6px;
-                    height: 6px;
-                    background: #ff4444;
-                    border-radius: 50%;
-                    transform: translate(-50%, -50%);
-                    left: ${50 + (distance / 200) * 40 * Math.cos(Math.random() * Math.PI * 2)}%;
-                    top: ${50 + (distance / 200) * 40 * Math.sin(Math.random() * Math.PI * 2)}%;
-                    box-shadow: 0 0 8px #ff4444;
-                `;
+                
+                // 방향 계산
+                const bearing = calculateBearing(gameState.position, player.position);
+                const radarDistance = Math.min(distance / 200 * 40, 40); // 레이더 반지름의 40% 내에서 표시
+                
+                const x = 50 + radarDistance * Math.cos((bearing - 90) * Math.PI / 180);
+                const y = 50 + radarDistance * Math.sin((bearing - 90) * Math.PI / 180);
+                
+                dot.style.left = x + '%';
+                dot.style.top = y + '%';
+                
+                // 거리에 따라 색상 조정
+                const intensity = 1 - (distance / 200);
+                dot.style.background = `rgba(255, 68, 68, ${intensity})`;
+                dot.style.boxShadow = `0 0 ${8 * intensity}px rgba(255, 68, 68, ${intensity})`;
+                
                 radar.appendChild(dot);
             }
         });
+    }
+
+    // 방위각 계산
+    function calculateBearing(pos1, pos2) {
+        const dLon = (pos2.lng - pos1.lng) * Math.PI / 180;
+        const lat1 = pos1.lat * Math.PI / 180;
+        const lat2 = pos2.lat * Math.PI / 180;
+        
+        const y = Math.sin(dLon) * Math.cos(lat2);
+        const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+        
+        const bearing = Math.atan2(y, x) * 180 / Math.PI;
+        return (bearing + 360) % 360;
     }
 
     // 발사 시작
     function startShooting(event) {
         if (event) event.preventDefault();
         
-        if (gameState.screen !== 'game' || gameState.ammo <= 0 || gameState.isReloading) {
+        if (gameState.screen !== 'game' || gameState.ammo <= 0 || gameState.isReloading || gameState.health <= 0) {
             return;
         }
         
@@ -849,13 +1247,28 @@
         shootBtn.style.transform = 'scale(0.9)';
         shootBtn.style.boxShadow = '0 0 30px rgba(255, 68, 68, 1)';
         
-        // 진동 효과 (지원하는 디바이스에서)
+        // 진동 효과
         if (navigator.vibrate) {
             navigator.vibrate(50);
         }
         
         // 명중 판정
-        checkHit();
+        const hitResult = checkHit();
+        
+        // 발사 정보를 다른 플레이어들에게 전송
+        broadcastMessage({
+            type: 'shot',
+            data: {
+                shooterId: gameState.playerId,
+                shooterName: gameState.playerName,
+                position: gameState.position,
+                orientation: gameState.orientation,
+                timestamp: now,
+                hitResult: hitResult
+            }
+        });
+        
+        updateGameUI();
         
         // 탄약 부족 시 자동 재장전
         if (gameState.ammo <= 0) {
@@ -877,8 +1290,10 @@
         let nearestPlayer = null;
         let nearestDistance = Infinity;
         
-        // 가장 가까운 플레이어 찾기
+        // 살아있는 플레이어 중 가장 가까운 플레이어 찾기
         gameState.players.forEach(player => {
+            if (player.health <= 0) return;
+            
             const distance = calculateDistance(gameState.position, player.position);
             if (distance < nearestDistance) {
                 nearestDistance = distance;
@@ -886,34 +1301,85 @@
             }
         });
         
-        if (nearestPlayer && nearestDistance < 50) { // 50m 이내에서만 명중 가능
-            // 조준 정확도 계산 (거리와 각도 기반)
-            const accuracy = Math.max(0, 1 - (nearestDistance / 50));
-            const hitChance = accuracy * 0.7; // 최대 70% 명중률
+        if (nearestPlayer && nearestDistance < 100) { // 100m 이내에서만 명중 가능
+            // 조준 정확도 계산 (거리 기반)
+            const accuracy = Math.max(0, 1 - (nearestDistance / 100));
+            const hitChance = accuracy * 0.6 + 0.2; // 20-80% 명중률
             
             if (Math.random() < hitChance) {
                 // 명중!
-                const damage = Math.floor(Math.random() * 30) + 20; // 20-50 데미지
+                const damage = Math.floor(Math.random() * 25) + 25; // 25-50 데미지
                 nearestPlayer.health = Math.max(0, nearestPlayer.health - damage);
+                
+                // 피해 정보를 해당 플레이어에게 전송
+                sendPeerMessage(nearestPlayer.id, {
+                    type: 'hit',
+                    data: {
+                        damage: damage,
+                        shooterId: gameState.playerId,
+                        shooterName: gameState.playerName,
+                        remainingHealth: nearestPlayer.health
+                    }
+                });
                 
                 if (nearestPlayer.health <= 0) {
                     // 플레이어 제거
-                    gameState.players.delete(nearestPlayer.id);
                     gameState.kills++;
                     showHitMarker(`${nearestPlayer.name} 제거! (+1 킬)`);
                     
-                    // 승리 조건 확인
-                    if (gameState.players.size === 0) {
-                        endGame('승리!', '🏆 축하합니다! 치킨을 획득했습니다!');
-                    }
+                    // 사망 알림 전송
+                    broadcastMessage({
+                        type: 'death',
+                        data: {
+                            playerId: nearestPlayer.id,
+                            playerName: nearestPlayer.name,
+                            killerId: gameState.playerId,
+                            killerName: gameState.playerName
+                        }
+                    });
+                    
                 } else {
                     showHitMarker(`${nearestPlayer.name} 적중! (-${damage}HP)`);
                 }
+                
+                return { hit: true, target: nearestPlayer.name, damage: damage };
             } else {
                 showHitMarker('빗나감');
+                return { hit: false, target: nearestPlayer.name };
             }
         } else {
             showHitMarker('사정거리 밖');
+            return { hit: false, target: null };
+        }
+    }
+
+    // 다른 플레이어의 발사 처리
+    function handlePeerShot(data, peerId) {
+        // 시각적/청각적 효과 (총소리, 총구 섬광 등)
+        console.log(`${data.shooterName}이 발사했습니다`);
+        
+        // 거리 기반 총소리 볼륨 조절 등의 효과를 추가할 수 있습니다
+    }
+
+    // 피격 처리
+    function handlePeerHit(data) {
+        gameState.health = Math.max(0, data.remainingHealth);
+        showHitMarker(`${data.shooterName}에게 피격! (-${data.damage}HP)`);
+        showHitEffect();
+        
+        if (gameState.health <= 0) {
+            endGame('패배', `${data.shooterName}에게 제거되었습니다!`);
+        }
+        
+        updateGameUI();
+    }
+
+    // 플레이어 사망 처리
+    function handlePlayerDeath(data, peerId) {
+        const player = gameState.players.get(peerId);
+        if (player) {
+            player.health = 0;
+            showHitMarker(`${data.playerName}이 ${data.killerName}에게 제거되었습니다`);
         }
     }
 
@@ -939,39 +1405,53 @@
         marker.textContent = message;
         document.body.appendChild(marker);
         
-        // 스타일시트에 애니메이션 추가
-        const style = document.createElement('style');
-        style.textContent = `
-            @keyframes hitMarkerFade {
-                0% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-                100% { opacity: 0; transform: translate(-50%, -50%) scale(1.2) translateY(-20px); }
-            }
-        `;
-        document.head.appendChild(style);
-        
         setTimeout(() => {
             marker.remove();
-            style.remove();
         }, 2000);
+    }
+
+    // 피격 효과
+    function showHitEffect() {
+        const effect = document.createElement('div');
+        effect.className = 'hit-effect';
+        document.body.appendChild(effect);
+        
+        setTimeout(() => {
+            effect.remove();
+        }, 500);
+        
+        // 진동
+        if (navigator.vibrate) {
+            navigator.vibrate([200, 100, 200]);
+        }
     }
 
     // 재장전
     function reload() {
-        if (gameState.isReloading || gameState.ammo === 30) return;
+        if (gameState.isReloading || gameState.ammo === gameState.maxAmmo || gameState.health <= 0) return;
         
         gameState.isReloading = true;
         showHitMarker('재장전 중...');
         
         setTimeout(() => {
-            gameState.ammo = 30;
+            gameState.ammo = gameState.maxAmmo;
             gameState.isReloading = false;
             showHitMarker('재장전 완료!');
-        }, 2000);
+            updateGameUI();
+        }, 2500);
     }
 
     // 게임 종료
     function endGame(title, message) {
-        clearInterval(gameState.gameLoop);
+        if (gameState.gameLoop) {
+            clearInterval(gameState.gameLoop);
+            gameState.gameLoop = null;
+        }
+        if (gameState.pingInterval) {
+            clearInterval(gameState.pingInterval);
+            gameState.pingInterval = null;
+        }
+        
         showStatus(title, message);
     }
 
@@ -979,109 +1459,30 @@
     function leaveGame() {
         if (gameState.gameLoop) {
             clearInterval(gameState.gameLoop);
+            gameState.gameLoop = null;
         }
-        gameState.connections.forEach(conn => conn.close());
+        if (gameState.pingInterval) {
+            clearInterval(gameState.pingInterval);
+            gameState.pingInterval = null;
+        }
+        
+        // P2P 연결 정리
+        gameState.connections.forEach((connection, peerId) => {
+            if (connection.peerConnection) {
+                connection.peerConnection.close();
+            }
+        });
         gameState.connections.clear();
         gameState.players.clear();
+        
+        // 시그널링 서버에 나가기 알림
+        sendSignalingMessage({
+            type: 'leave-game',
+            roomCode: gameState.roomCode,
+            playerId: gameState.playerId
+        });
+        
         showScreen('lobby');
-    }
-
-    // 위치 정보 브로드캐스트
-    function broadcastPosition() {
-        const message = {
-            type: 'position',
-            data: {
-                playerId: gameState.playerName,
-                position: gameState.position,
-                orientation: gameState.orientation,
-                health: gameState.health,
-                timestamp: Date.now()
-            }
-        };
-        
-        // P2P 연결을 통해 다른 플레이어들에게 전송
-        gameState.connections.forEach(conn => {
-            if (conn.readyState === 'open') {
-                try {
-                    conn.send(JSON.stringify(message));
-                } catch (e) {
-                    console.log('메시지 전송 실패:', e);
-                }
-            }
-        });
-    }
-
-    // 상태 메시지 표시
-    function showStatus(title, message) {
-        document.getElementById('statusTitle').textContent = title;
-        document.getElementById('statusMessage').textContent = message;
-        document.getElementById('statusOverlay').classList.remove('hidden');
-    }
-
-    // 상태 메시지 닫기
-    function closeStatus() {
-        document.getElementById('statusOverlay').classList.add('hidden');
-    }
-
-    // P2P 연결 설정 (실제 구현시 필요)
-    function createPeerConnection(playerId) {
-        const pc = new RTCPeerConnection(rtcConfig);
-        
-        // 데이터 채널 생성
-        const dataChannel = pc.createDataChannel('game', {
-            ordered: false,
-            maxRetransmits: 0
-        });
-        
-        dataChannel.onopen = () => {
-            console.log(`${playerId}와 연결됨`);
-            updateConnectionStatus('connected');
-        };
-        
-        dataChannel.onmessage = (event) => {
-            handlePeerMessage(JSON.parse(event.data));
-        };
-        
-        dataChannel.onerror = (error) => {
-            console.log('데이터 채널 오류:', error);
-            updateConnectionStatus('disconnected');
-        };
-        
-        pc.ondatachannel = (event) => {
-            const channel = event.channel;
-            channel.onmessage = (event) => {
-                handlePeerMessage(JSON.parse(event.data));
-            };
-        };
-        
-        gameState.connections.set(playerId, dataChannel);
-        return pc;
-    }
-
-    // 피어 메시지 처리
-    function handlePeerMessage(message) {
-        switch (message.type) {
-            case 'position':
-                updatePlayerPosition(message.data);
-                break;
-            case 'shot':
-                handlePeerShot(message.data);
-                break;
-            case 'hit':
-                handlePeerHit(message.data);
-                break;
-        }
-    }
-
-    // 다른 플레이어 위치 업데이트
-    function updatePlayerPosition(data) {
-        gameState.players.set(data.playerId, {
-            ...gameState.players.get(data.playerId),
-            position: data.position,
-            orientation: data.orientation,
-            health: data.health,
-            lastSeen: Date.now()
-        });
     }
 
     // 연결 상태 업데이트
@@ -1102,6 +1503,126 @@
         }
     }
 
+    // 상태 메시지 표시
+    function showStatus(title, message) {
+        document.getElementById('statusTitle').textContent = title;
+        document.getElementById('statusMessage').textContent = message;
+        document.getElementById('statusOverlay').classList.remove('hidden');
+    }
+
+    // 상태 메시지 닫기
+    function closeStatus() {
+        document.getElementById('statusOverlay').classList.add('hidden');
+    }
+
+    // 시그널링 메시지 핸들러들
+    function handlePlayerJoin(message) {
+        console.log('플레이어 참가:', message.playerName);
+        // 기존 플레이어인 경우 WebRTC 연결 시작
+        if (gameState.isHost) {
+            createOffer(message.playerId);
+        }
+    }
+
+    function handleOffer(message) {
+        if (message.targetId === gameState.playerId) {
+            handleRemoteOffer(message);
+        }
+    }
+
+    function handleAnswer(message) {
+        if (message.targetId === gameState.playerId) {
+            handleRemoteAnswer(message);
+        }
+    }
+
+    function handleIceCandidate(message) {
+        if (message.targetId === gameState.playerId) {
+            handleRemoteIceCandidate(message);
+        }
+    }
+
+    function handlePlayerLeave(message) {
+        console.log('플레이어 나감:', message.playerId);
+        const connection = gameState.connections.get(message.playerId);
+        if (connection) {
+            connection.peerConnection.close();
+            gameState.connections.delete(message.playerId);
+        }
+        gameState.players.delete(message.playerId);
+        updateConnectedCount();
+    }
+
+    function handleGameStart(message) {
+        if (!gameState.isHost) {
+            initializeGame();
+        }
+    }
+
+    // WebRTC Offer 생성
+    async function createOffer(peerId) {
+        try {
+            const peerConnection = createPeerConnection(peerId);
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            
+            sendSignalingMessage({
+                type: 'offer',
+                roomCode: gameState.roomCode,
+                senderId: gameState.playerId,
+                targetId: peerId,
+                offer: offer
+            });
+        } catch (error) {
+            console.error('Offer 생성 실패:', error);
+        }
+    }
+
+    // WebRTC Offer 처리
+    async function handleRemoteOffer(message) {
+        try {
+            const peerConnection = createPeerConnection(message.senderId);
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(message.offer));
+            
+            const answer = await peerConnection.createAnswer();
+            await peerConnection.setLocalDescription(answer);
+            
+            sendSignalingMessage({
+                type: 'answer',
+                roomCode: gameState.roomCode,
+                senderId: gameState.playerId,
+                targetId: message.senderId,
+                answer: answer
+            });
+        } catch (error) {
+            console.error('Offer 처리 실패:', error);
+        }
+    }
+
+    // WebRTC Answer 처리
+    async function handleRemoteAnswer(message) {
+        try {
+            const connection = gameState.connections.get(message.senderId);
+            if (connection && connection.peerConnection) {
+                await connection.peerConnection.setRemoteDescription(new RTCSessionDescription(message.answer));
+            }
+        } catch (error) {
+            console.error('Answer 처리 실패:', error);
+        }
+    }
+
+    // ICE Candidate 처리
+    async function handleRemoteIceCandidate(message) {
+        try {
+            const connection = gameState.connections.get(message.senderId);
+            if (connection && connection.peerConnection) {
+                await connection.peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+            }
+        } catch (error) {
+            console.error('ICE Candidate 처리 실패:', error);
+        }
+    }
+
     // 키보드 이벤트 (데스크톱에서 테스트용)
     document.addEventListener('keydown', (event) => {
         if (gameState.screen === 'game') {
@@ -1115,7 +1636,29 @@
                     event.preventDefault();
                     reload();
                     break;
+                case 'Escape':
+                    event.preventDefault();
+                    leaveGame();
+                    break;
             }
+        }
+    });
+
+    // 터치 이벤트 처리 개선
+    document.getElementById('shootButton').addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        startShooting();
+    });
+    
+    document.getElementById('shootButton').addEventListener('touchend', (e) => {
+        e.preventDefault();
+        stopShooting();
+    });
+
+    // 방 코드 입력에서 엔터키 처리
+    document.getElementById('roomCodeInput').addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') {
+            joinRoom();
         }
     });
 
@@ -1126,7 +1669,7 @@
         }, 100);
     });
 
-    // 화면 꺼짐 방지 (게임 중)
+    // 화면 꺼짐 방지
     let wakeLock = null;
     async function requestWakeLock() {
         try {
@@ -1151,74 +1694,211 @@
         if (wakeLock) {
             wakeLock.release();
         }
-        gameState.connections.forEach(conn => conn.close());
-    });
-
-    // 터치 이벤트 처리 개선
-    let touchStartTime = 0;
-    
-    document.getElementById('shootButton').addEventListener('touchstart', (e) => {
-        e.preventDefault();
-        touchStartTime = Date.now();
-        startShooting();
-    });
-    
-    document.getElementById('shootButton').addEventListener('touchend', (e) => {
-        e.preventDefault();
-        stopShooting();
-    });
-
-    // 방 코드 입력에서 엔터키 처리
-    document.getElementById('roomCodeInput').addEventListener('keypress', (e) => {
-        if (e.key === 'Enter') {
-            joinRoom();
+        
+        // 모든 연결 정리
+        gameState.connections.forEach((connection) => {
+            if (connection.peerConnection) {
+                connection.peerConnection.close();
+            }
+        });
+        
+        if (gameState.signaling) {
+            gameState.signaling.close();
+        }
+        
+        if (gameState.gameLoop) {
+            clearInterval(gameState.gameLoop);
+        }
+        
+        if (gameState.pingInterval) {
+            clearInterval(gameState.pingInterval);
         }
     });
 
-    // 데모용 AI 적들의 간단한 행동
-    function simulateAI() {
-        if (gameState.screen !== 'game') return;
+    // 데모용 AI 시뮬레이션 (실제 플레이어가 없을 때)
+    function addDemoPlayers() {
+        if (gameState.connections.size === 0 && gameState.screen === 'game') {
+            // 가상의 플레이어들 생성
+            for (let i = 1; i <= 2; i++) {
+                const virtualPlayer = {
+                    id: `demo_player_${i}`,
+                    name: generateRandomName(),
+                    health: 100,
+                    position: {
+                        lat: gameState.position.lat + (Math.random() - 0.5) * 0.002,
+                        lng: gameState.position.lng + (Math.random() - 0.5) * 0.002
+                    },
+                    lastSeen: Date.now()
+                };
+                gameState.players.set(virtualPlayer.id, virtualPlayer);
+            }
+            
+            updateGameUI();
+        }
+    }
+
+    // 데모 AI 행동
+    function simulateDemoAI() {
+        if (gameState.screen !== 'game' || gameState.connections.size > 0) return;
         
         gameState.players.forEach((player, id) => {
-            // 가끔 플레이어에게 피해를 줌 (데모용)
-            if (Math.random() < 0.001) { // 0.1% 확률
-                const distance = calculateDistance(gameState.position, player.position);
-                if (distance < 30) { // 30m 이내
-                    gameState.health = Math.max(0, gameState.health - Math.floor(Math.random() * 20 + 10));
-                    showHitEffect();
-                    
-                    if (gameState.health <= 0) {
-                        endGame('패배', `${player.name}에게 제거되었습니다!`);
+            if (id.startsWith('demo_player_') && player.health > 0) {
+                // 랜덤 이동
+                player.position.lat += (Math.random() - 0.5) * 0.0001;
+                player.position.lng += (Math.random() - 0.5) * 0.0001;
+                
+                // 가끔 플레이어에게 피해를 줌
+                if (Math.random() < 0.005) { // 0.5% 확률
+                    const distance = calculateDistance(gameState.position, player.position);
+                    if (distance < 50 && gameState.health > 0) { // 50m 이내
+                        const damage = Math.floor(Math.random() * 20 + 10);
+                        gameState.health = Math.max(0, gameState.health - damage);
+                        showHitMarker(`${player.name}에게 피격! (-${damage}HP)`);
+                        showHitEffect();
+                        
+                        if (gameState.health <= 0) {
+                            endGame('패배', `${player.name}에게 제거되었습니다!`);
+                        }
+                        updateGameUI();
                     }
                 }
             }
         });
     }
 
-    // 피격 효과
-    function showHitEffect() {
-        const effect = document.createElement('div');
-        effect.className = 'hit-effect';
-        document.body.appendChild(effect);
+    // 데모 시뮬레이션 시작
+    setInterval(() => {
+        addDemoPlayers();
+        simulateDemoAI();
+    }, 100);
+
+    // 실제 시그널링 서버 구현 예제 (Firebase 사용 시)
+    /*
+    function initFirebaseSignaling() {
+        // Firebase 구성
+        const firebaseConfig = {
+            // Firebase 프로젝트 설정
+        };
         
-        setTimeout(() => {
-            effect.remove();
-        }, 500);
+        // Firebase 초기화
+        firebase.initializeApp(firebaseConfig);
+        const database = firebase.database();
         
-        // 진동
-        if (navigator.vibrate) {
-            navigator.vibrate([200, 100, 200]);
+        // 방 생성/참가
+        function createFirebaseRoom() {
+            const roomRef = database.ref('rooms/' + gameState.roomCode);
+            roomRef.set({
+                host: gameState.playerId,
+                created: Date.now(),
+                players: {
+                    [gameState.playerId]: {
+                        name: gameState.playerName,
+                        isHost: true,
+                        lastSeen: Date.now()
+                    }
+                }
+            });
+            
+            // 플레이어 참가 감지
+            roomRef.child('players').on('child_added', (snapshot) => {
+                const playerId = snapshot.key;
+                const playerData = snapshot.val();
+                
+                if (playerId !== gameState.playerId) {
+                    console.log('새 플레이어 참가:', playerData.name);
+                    if (gameState.isHost) {
+                        createOffer(playerId);
+                    }
+                }
+            });
+        }
+        
+        function joinFirebaseRoom() {
+            const roomRef = database.ref('rooms/' + gameState.roomCode);
+            roomRef.child('players/' + gameState.playerId).set({
+                name: gameState.playerName,
+                isHost: false,
+                lastSeen: Date.now()
+            });
+            
+            // 시그널링 메시지 처리
+            roomRef.child('signals').on('child_added', (snapshot) => {
+                const signal = snapshot.val();
+                if (signal.targetId === gameState.playerId) {
+                    handleSignalingMessage(signal);
+                    // 메시지 삭제
+                    snapshot.ref.remove();
+                }
+            });
+        }
+        
+        function sendFirebaseSignal(message) {
+            const roomRef = database.ref('rooms/' + gameState.roomCode + '/signals');
+            roomRef.push(message);
         }
     }
+    */
 
-    // AI 시뮬레이션 시작
-    setInterval(simulateAI, 100);
+    // Socket.io 시그널링 서버 구현 예제
+    /*
+    function initSocketSignaling() {
+        const socket = io('https://your-signaling-server.com');
+        
+        socket.on('connect', () => {
+            console.log('시그널링 서버 연결됨');
+            updateConnectionStatus('connected');
+        });
+        
+        socket.on('disconnect', () => {
+            console.log('시그널링 서버 연결 끊김');
+            updateConnectionStatus('disconnected');
+        });
+        
+        socket.on('room-created', (data) => {
+            console.log('방 생성됨:', data.roomCode);
+        });
+        
+        socket.on('player-joined', (data) => {
+            console.log('플레이어 참가:', data.playerName);
+            if (gameState.isHost) {
+                createOffer(data.playerId);
+            }
+        });
+        
+        socket.on('signal', (data) => {
+            handleSignalingMessage(data);
+        });
+        
+        // 방 생성
+        function createSocketRoom() {
+            socket.emit('create-room', {
+                roomCode: gameState.roomCode,
+                playerId: gameState.playerId,
+                playerName: gameState.playerName
+            });
+        }
+        
+        // 방 참가
+        function joinSocketRoom() {
+            socket.emit('join-room', {
+                roomCode: gameState.roomCode,
+                playerId: gameState.playerId,
+                playerName: gameState.playerName
+            });
+        }
+        
+        // 시그널링 메시지 전송
+        function sendSocketSignal(message) {
+            socket.emit('signal', message);
+        }
+    }
+    */
 
-    // PWA 매니페스트 (선택사항)
+    // PWA 매니페스트
     const manifest = {
-        name: "PUBG AR - 배틀로얄",
+        name: "PUBG AR - 실시간 배틀로얄",
         short_name: "PUBG AR",
-        description: "로그인 없는 P2P 증강현실 배틀로얄 게임",
+        description: "실시간 P2P 멀티플레이어 증강현실 배틀로얄 게임",
         start_url: "/",
         display: "standalone",
         background_color: "#1a1a2e",
@@ -1233,12 +1913,15 @@
         ]
     };
 
-    // 서비스 워커 등록 (오프라인 지원)
+    // 서비스 워커 등록
     if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
             const swCode = `
-                const CACHE_NAME = 'pubg-ar-v1';
-                const urlsToCache = ['/'];
+                const CACHE_NAME = 'pubg-ar-multiplayer-v1';
+                const urlsToCache = [
+                    '/',
+                    '/manifest.json'
+                ];
                 
                 self.addEventListener('install', (event) => {
                     event.waitUntil(
@@ -1250,7 +1933,28 @@
                 self.addEventListener('fetch', (event) => {
                     event.respondWith(
                         caches.match(event.request)
-                            .then((response) => response || fetch(event.request))
+                            .then((response) => {
+                                // 캐시된 버전이 있으면 반환, 없으면 네트워크에서 가져오기
+                                return response || fetch(event.request);
+                            })
+                    );
+                });
+                
+                // 푸시 알림 처리 (선택사항)
+                self.addEventListener('push', (event) => {
+                    const options = {
+                        body: event.data ? event.data.text() : '새로운 게임이 시작되었습니다!',
+                        icon: '/icon-192x192.png',
+                        badge: '/badge-72x72.png',
+                        vibrate: [100, 50, 100],
+                        data: {
+                            dateOfArrival: Date.now(),
+                            primaryKey: '1'
+                        }
+                    };
+                    
+                    event.waitUntil(
+                        self.registration.showNotification('PUBG AR', options)
                     );
                 });
             `;
@@ -1259,10 +1963,129 @@
             const swUrl = URL.createObjectURL(blob);
             
             navigator.serviceWorker.register(swUrl)
-                .then(() => console.log('서비스 워커 등록 완료'))
-                .catch(err => console.log('서비스 워커 등록 실패:', err));
+                .then((registration) => {
+                    console.log('서비스 워커 등록 완료:', registration.scope);
+                })
+                .catch((error) => {
+                    console.log('서비스 워커 등록 실패:', error);
+                });
         });
     }
+
+    // 매니페스트 동적 생성
+    const manifestBlob = new Blob([JSON.stringify(manifest)], { type: 'application/json' });
+    const manifestUrl = URL.createObjectURL(manifestBlob);
+    const link = document.createElement('link');
+    link.rel = 'manifest';
+    link.href = manifestUrl;
+    document.head.appendChild(link);
+
+    // 디버그 정보 표시 (개발용)
+    function showDebugInfo() {
+        if (gameState.screen === 'game') {
+            console.log('=== 게임 상태 ===');
+            console.log('플레이어 수:', gameState.players.size);
+            console.log('연결 수:', gameState.connections.size);
+            console.log('위치:', gameState.position);
+            console.log('체력:', gameState.health);
+            console.log('탄약:', gameState.ammo);
+            console.log('=================');
+        }
+    }
+
+    // 디버그 정보 주기적 출력 (개발용)
+    setInterval(showDebugInfo, 10000);
+
+    // 연결 품질 모니터링
+    function monitorConnectionQuality() {
+        gameState.connections.forEach((connection, peerId) => {
+            if (connection.peerConnection) {
+                connection.peerConnection.getStats().then(stats => {
+                    stats.forEach(report => {
+                        if (report.type === 'data-channel') {
+                            console.log(`${peerId} 데이터 채널 통계:`, {
+                                bytesReceived: report.bytesReceived,
+                                bytesSent: report.bytesSent,
+                                messagesReceived: report.messagesReceived,
+                                messagesSent: report.messagesSent
+                            });
+                        }
+                    });
+                }).catch(console.error);
+            }
+        });
+    }
+
+    // 연결 품질 모니터링 시작 (5초마다)
+    setInterval(monitorConnectionQuality, 5000);
+
+    // 앱 설치 프롬프트 처리
+    let deferredPrompt;
+    window.addEventListener('beforeinstallprompt', (e) => {
+        // 기본 설치 프롬프트 방지
+        e.preventDefault();
+        // 나중에 사용하기 위해 이벤트 저장
+        deferredPrompt = e;
+        
+        // 사용자에게 앱 설치 옵션 표시
+        showInstallButton();
+    });
+
+    function showInstallButton() {
+        // 설치 버튼 표시 로직
+        const installBtn = document.createElement('button');
+        installBtn.textContent = '📱 앱 설치';
+        installBtn.className = 'btn btn-info';
+        installBtn.style.cssText = 'position: fixed; bottom: 20px; right: 20px; z-index: 200;';
+        installBtn.onclick = installApp;
+        document.body.appendChild(installBtn);
+    }
+
+    function installApp() {
+        if (deferredPrompt) {
+            deferredPrompt.prompt();
+            deferredPrompt.userChoice.then((choiceResult) => {
+                if (choiceResult.outcome === 'accepted') {
+                    console.log('사용자가 앱 설치에 동의했습니다');
+                }
+                deferredPrompt = null;
+            });
+        }
+    }
+
+    // 네트워크 상태 모니터링
+    function updateNetworkStatus() {
+        const isOnline = navigator.onLine;
+        const statusEl = document.getElementById('connectionStatus');
+        
+        if (!isOnline) {
+            statusEl.textContent = '🔴 오프라인';
+            statusEl.className = 'connection-status disconnected';
+        }
+    }
+
+    window.addEventListener('online', updateNetworkStatus);
+    window.addEventListener('offline', updateNetworkStatus);
+
+    // 성능 최적화: requestAnimationFrame을 이용한 부드러운 업데이트
+    let lastFrameTime = 0;
+    function gameRenderLoop(currentTime) {
+        const deltaTime = currentTime - lastFrameTime;
+        
+        if (gameState.screen === 'game' && deltaTime >= 16) { // 60fps 제한
+            updateRadar();
+            lastFrameTime = currentTime;
+        }
+        
+        requestAnimationFrame(gameRenderLoop);
+    }
+    
+    // 렌더링 루프 시작
+    requestAnimationFrame(gameRenderLoop);
+
+    console.log('🎮 PUBG AR 멀티플레이어 로드 완료!');
+    console.log('📱 실제 멀티플레이어를 위해서는 시그널링 서버가 필요합니다.');
+    console.log('🔧 Firebase, Socket.io, 또는 WebSocket 서버를 사용하세요.');
 </script>
 ```
 
