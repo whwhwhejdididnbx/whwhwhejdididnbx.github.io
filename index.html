@@ -3,24 +3,26 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Real Battle AR — HTML Prototype</title>
+  <title>Real Battle AR — Multiplayer (1v1) Prototype</title>
   <style>
     html, body { margin:0; padding:0; height:100%; background:#000; overflow:hidden; touch-action:none; }
     #app { position:fixed; inset:0; }
-    video#cam { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; transform:scaleX(-1); } /* 셀피 느낌 미러 */
+    video#cam { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; } /* 기본: 미러 아님 */
+    .flipX { transform: scaleX(-1); }
     canvas#hud { position:absolute; inset:0; pointer-events:none; }
     .ui {
       position:absolute; left:0; right:0; bottom:0;
       display:flex; justify-content:space-between; align-items:flex-end;
-      padding:16px; gap:12px; pointer-events:none;
+      padding:12px; gap:8px; pointer-events:none;
     }
     .pill {
       background:rgba(0,0,0,.45); color:#fff; font-family:system-ui,-apple-system,Segoe UI,Roboto,Apple Color Emoji,Noto Color Emoji;
       padding:8px 12px; border-radius:999px; font-size:14px; backdrop-filter:blur(6px);
       pointer-events:auto; user-select:none;
+      border:1px solid rgba(255,255,255,.15);
     }
-    #fireBtn { font-size:16px; padding:14px 18px; border:2px solid rgba(255,255,255,.2); }
-    #msg { position:absolute; top:10px; left:50%; transform:translateX(-50%); color:#fff; font-family:system-ui; font-size:14px; background:rgba(0,0,0,.45); padding:6px 10px; border-radius:10px; }
+    #fireBtn { font-size:16px; padding:14px 18px; border:2px solid rgba(255,255,255,.25); }
+    #msg { position:absolute; top:8px; left:50%; transform:translateX(-50%); color:#fff; font-family:system-ui; font-size:13px; background:rgba(0,0,0,.45); padding:6px 10px; border-radius:10px; }
     #scopeDot {
       position:absolute; left:50%; top:50%; width:22px; height:22px; margin:-11px 0 0 -11px;
       border:2px solid rgba(255,255,255,.9); border-radius:50%;
@@ -33,12 +35,22 @@
       opacity:0; transform:scale(.5); filter:blur(2px); pointer-events:none;
       mix-blend-mode:screen;
     }
-    .hitFlash {
-      position:absolute; inset:0; background:rgba(255,255,255,.15); pointer-events:none; opacity:0; transition:opacity .18s ease;
+    .hitFlash { position:absolute; inset:0; background:rgba(255,255,255,.15); pointer-events:none; opacity:0; transition:opacity .18s ease; }
+    #topBar {
+      position:absolute; top:0; left:0; right:0; display:flex; gap:8px; align-items:center;
+      padding:6px; z-index:10; pointer-events:auto;
     }
-    .qrBox {
-      position:absolute; border:2px dashed #00ff88; box-shadow:0 0 8px rgba(0,255,136,.6); pointer-events:none;
+    #topBar .pill { display:flex; align-items:center; gap:6px; }
+    #connectPanel {
+      position:absolute; right:6px; top:44px; width: min(480px, 94vw); max-height: 70vh; overflow:auto;
+      background:rgba(0,0,0,.55); color:#fff; padding:8px; border-radius:10px; border:1px solid rgba(255,255,255,.15);
+      font-family:system-ui; font-size:12px; pointer-events:auto;
     }
+    textarea { width:100%; height:80px; background:rgba(0,0,0,.4); color:#eee; border:1px solid rgba(255,255,255,.2); border-radius:8px; padding:6px; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    button.small { padding:6px 10px; border-radius:999px; border:1px solid rgba(255,255,255,.2); background:rgba(255,255,255,.06); color:#fff; cursor:pointer; }
+    label { display:block; margin:6px 0 2px; }
+    #name { width:140px; }
+    #remoteHP { font-weight:bold; }
   </style>
 </head>
 <body>
@@ -47,241 +59,407 @@
     <canvas id="hud"></canvas>
     <div id="scopeDot" aria-hidden="true"></div>
     <div id="muzzle" aria-hidden="true"></div>
-    <div id="msg">카메라 권한을 허용하고, 화면 탭 또는 🔊볼륨 버튼으로 발사 • 위로 스와이프=장전</div>
+    <div id="msg">카메라 권한을 허용하고, 화면 탭=발사 • 위로 스와이프=장전 • QR 조준시 HIT</div>
+
+    <div id="topBar">
+      <div class="pill">내 HP: <span id="hp">100</span></div>
+      <div class="pill">탄약: <span id="ammo">8</span> / 8</div>
+      <div class="pill">상대 HP: <span id="remoteHP">?</span></div>
+      <div class="pill"><input id="name" placeholder="내 닉네임" value="Player" /></div>
+      <div class="pill"><label style="display:flex;gap:6px;align-items:center;"><input type="checkbox" id="flipX"> 좌우반전</label></div>
+      <div class="pill"><button class="small" id="toggleConnect">🔗 연결</button></div>
+    </div>
 
     <div class="ui">
-      <div class="pill">HP: <span id="hp">100</span></div>
       <button class="pill" id="fireBtn">🔫 FIRE</button>
-      <div class="pill">Ammo: <span id="ammo">8</span> / 8</div>
     </div>
     <div class="hitFlash" id="hitFx"></div>
   </div>
 
+  <div id="connectPanel" hidden>
+    <div><b>멀티플레이(1v1) — WebRTC 복붙 연결</b></div>
+    <ol>
+      <li><b>호스트</b>: "Create Offer" → 텍스트 복사 → 상대에게 전달.</li>
+      <li><b>게스트</b>: 받은 Offer를 아래 상자에 붙여넣기 → "Create Answer" → 생성된 Answer를 호스트에게 전달.</li>
+      <li>호스트: 받은 Answer를 상자에 붙여넣고 "Set Remote Answer".</li>
+    </ol>
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+      <div>
+        <label>Local Offer</label>
+        <textarea id="offerOut" readonly></textarea>
+        <div style="display:flex; gap:6px; margin-top:4px;">
+          <button class="small" id="btnCreateOffer">Create Offer</button>
+          <button class="small" id="btnCopyOffer">Copy</button>
+        </div>
+      </div>
+      <div>
+        <label>Remote Offer (paste here)</label>
+        <textarea id="offerIn"></textarea>
+        <div style="display:flex; gap:6px; margin-top:4px;">
+          <button class="small" id="btnCreateAnswer">Create Answer</button>
+        </div>
+      </div>
+      <div>
+        <label>Local Answer</label>
+        <textarea id="answerOut" readonly></textarea>
+        <div style="display:flex; gap:6px; margin-top:4px;">
+          <button class="small" id="btnCopyAnswer">Copy</button>
+        </div>
+      </div>
+      <div>
+        <label>Remote Answer (paste here)</label>
+        <textarea id="answerIn"></textarea>
+        <div style="display:flex; gap:6px; margin-top:4px;">
+          <button class="small" id="btnSetRemoteAnswer">Set Remote Answer</button>
+        </div>
+      </div>
+    </div>
+    <div style="margin-top:6px; opacity:.8;">연결되면 상대 HP/이벤트가 동기화됩니다. STUN만 사용(서버 없음) — 네트워크 환경에 따라 연결이 안 될 수도 있습니다(잘 모르겠습니다).</div>
+  </div>
+
+  <!-- jsQR: QR/바코드 감지 라이브러리 (브라우저 호환용) -->
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+
   <script>
-    // ---- State ----
-    const state = {
-      ammo: 8, clip: 8, reloading: false,
-      hp: 100,
-      lastShot: 0,
-      supportsBarcode: 'BarcodeDetector' in window,
-      detectors: null,
-      qrTargets: [], // {x,y,w,h, rawValue}
-      wakeLock: null,
+  // ====== 상태 ======
+  const state = {
+    ammo: 8, clip: 8, reloading: false,
+    hp: 100,
+    lastShot: 0,
+    qrBox: null, // {points:[{x,y}*4], data}
+    wakeLock: null,
+    // RTC
+    pc: null, dc: null, connected: false,
+  };
+
+  const video = document.getElementById('cam');
+  const hud = document.getElementById('hud');
+  const ctx = hud.getContext('2d', { alpha: true });
+  const ammoEl = document.getElementById('ammo');
+  const hpEl = document.getElementById('hp');
+  const remoteHpEl = document.getElementById('remoteHP');
+  const fireBtn = document.getElementById('fireBtn');
+  const muzzle = document.getElementById('muzzle');
+  const hitFx = document.getElementById('hitFx');
+  const msg = document.getElementById('msg');
+  const nameInput = document.getElementById('name');
+  const flipX = document.getElementById('flipX');
+  const connectPanel = document.getElementById('connectPanel');
+  const toggleConnect = document.getElementById('toggleConnect');
+
+  // RTC UI
+  const offerOut = document.getElementById('offerOut');
+  const offerIn = document.getElementById('offerIn');
+  const answerOut = document.getElementById('answerOut');
+  const answerIn = document.getElementById('answerIn');
+  const btnCreateOffer = document.getElementById('btnCreateOffer');
+  const btnCopyOffer = document.getElementById('btnCopyOffer');
+  const btnCreateAnswer = document.getElementById('btnCreateAnswer');
+  const btnCopyAnswer = document.getElementById('btnCopyAnswer');
+  const btnSetRemoteAnswer = document.getElementById('btnSetRemoteAnswer');
+
+  // ====== 카메라 ======
+  async function startCamera() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment' }, audio: false
+      });
+      video.srcObject = stream;
+      await video.play();
+      resize();
+      info('카메라 준비 완료');
+    } catch (e) {
+      info('카메라 접근 실패: HTTPS/권한 필요');
+      console.error(e);
+    }
+  }
+
+  function resize() { hud.width = innerWidth; hud.height = innerHeight; }
+  addEventListener('resize', resize);
+
+  // ====== Wake Lock ======
+  async function keepAwake(on) {
+    try {
+      if (on && 'wakeLock' in navigator) {
+        state.wakeLock = await navigator.wakeLock.request('screen');
+      } else if (state.wakeLock) {
+        state.wakeLock.release(); state.wakeLock = null;
+      }
+    } catch (_) { /* 미지원 가능 */ }
+  }
+
+  // ====== 사운드 ======
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  function playShot() {
+    const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+    o.type = 'square'; o.frequency.value = 220;
+    g.gain.setValueAtTime(0.001, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.6, audioCtx.currentTime + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.15);
+    o.connect(g).connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime + 0.16);
+  }
+  function playReload() {
+    const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+    o.type = 'triangle'; o.frequency.value = 600;
+    g.gain.setValueAtTime(0.001, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.3, audioCtx.currentTime + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.25);
+    o.connect(g).connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime + 0.26);
+  }
+
+  // ====== 조작 ======
+  function updateHUDText() { ammoEl.textContent = state.ammo; hpEl.textContent = state.hp; }
+  function muzzleFlash() {
+    muzzle.style.transition = 'none';
+    muzzle.style.opacity = '1'; muzzle.style.transform = 'scale(1.0)';
+    requestAnimationFrame(() => {
+      muzzle.style.transition = 'opacity .12s ease, transform .12s ease';
+      muzzle.style.opacity = '0'; muzzle.style.transform = 'scale(1.4)';
+    });
+  }
+  function screenHitFlash() { hitFx.style.opacity = '1'; setTimeout(()=> hitFx.style.opacity = '0', 120); }
+
+  function fire() {
+    const now = performance.now();
+    if (now - state.lastShot < 120) return;
+    if (state.reloading) return;
+    if (state.ammo <= 0) { info('탄약 없음! 위로 스와이프=장전'); return; }
+    state.ammo--; updateHUDText();
+    state.lastShot = now;
+    playShot(); muzzleFlash(); screenHitFlash();
+    // 로컬 히트 판정
+    if (isCenterInQR()) {
+      info('HIT!');
+      send({ t:'hit', amt:20, by:nameInput.value || 'Player' });
+    }
+    // 발사 이벤트 알림(연출용)
+    send({ t:'fire' });
+  }
+
+  function reload() {
+    if (state.reloading) return;
+    state.reloading = true; info('장전 중...');
+    setTimeout(()=> {
+      state.ammo = state.clip; state.reloading = false; updateHUDText();
+      playReload(); info('장전 완료');
+    }, 800);
+  }
+
+  let touchStartY = 0;
+  addEventListener('touchstart', (e)=>{
+    if (e.target === fireBtn) return;
+    touchStartY = e.touches[0].clientY;
+  }, {passive:true});
+  addEventListener('touchend', (e)=>{
+    const endY = (e.changedTouches[0]||{}).clientY || 0;
+    if (touchStartY - endY > 60) reload(); else fire();
+  });
+  fireBtn.addEventListener('click', fire);
+
+  // ====== QR (jsQR) ======
+  // jsQR는 캔버스 픽셀로 분석함. video -> hidden canvas -> imageData -> jsQR
+  const scanCanvas = document.createElement('canvas');
+  const scanCtx = scanCanvas.getContext('2d', { willReadFrequently:true });
+
+  function drawHUD() {
+    ctx.clearRect(0,0,hud.width,hud.height);
+    // 십자선
+    const cx = hud.width/2, cy = hud.height/2;
+    ctx.globalAlpha = 0.85;
+    ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(255,255,255,.7)';
+    ctx.beginPath();
+    ctx.moveTo(cx-40, cy); ctx.lineTo(cx-14, cy);
+    ctx.moveTo(cx+14, cy); ctx.lineTo(cx+40, cy);
+    ctx.moveTo(cx, cy-40); ctx.lineTo(cx, cy-14);
+    ctx.moveTo(cx, cy+14); ctx.lineTo(cx, cy+40);
+    ctx.stroke();
+
+    // QR 박스
+    if (state.qrBox) {
+      ctx.strokeStyle = 'rgba(0,255,136,.9)'; ctx.lineWidth = 3;
+      ctx.setLineDash([6,4]); ctx.beginPath();
+      const p = state.qrBox.points;
+      ctx.moveTo(p[0].x, p[0].y);
+      for (let i=1;i<p.length;i++) ctx.lineTo(p[i].x, p[i].y);
+      ctx.closePath(); ctx.stroke(); ctx.setLineDash([]);
+      ctx.font = '12px system-ui'; ctx.fillStyle='rgba(0,255,136,.9)';
+      ctx.fillText(state.qrBox.data || 'QR', p[0].x+4, p[0].y-6);
+    }
+    requestAnimationFrame(drawHUD);
+  }
+
+  function isCenterInQR() {
+    if (!state.qrBox) return false;
+    const cx = hud.width/2, cy = hud.height/2;
+    const pts = state.qrBox.points;
+    // 점-다각형 포함 판정 (ray casting)
+    let inside = false;
+    for (let i=0, j=pts.length-1; i<pts.length; j=i++) {
+      const xi = pts[i].x, yi = pts[i].y;
+      const xj = pts[j].x, yj = pts[j].y;
+      const intersect = ((yi>cy)!=(yj>cy)) && (cx < (xj - xi) * (cy - yi) / ((yj - yi) || 1e-6) + xi);
+      if (intersect) inside = !inside;
+    }
+    return inside;
+  }
+
+  async function scanLoop() {
+    if (video.readyState >= 2) {
+      // 비디오 프레임을 캔버스로 복사
+      scanCanvas.width = hud.width;
+      scanCanvas.height = hud.height;
+      // 비디오를 좌우반전 설정에 맞춰 그리기
+      scanCtx.save();
+      if (flipX.checked) {
+        scanCtx.translate(scanCanvas.width, 0);
+        scanCtx.scale(-1, 1);
+      }
+      scanCtx.drawImage(video, 0, 0, scanCanvas.width, scanCanvas.height);
+      scanCtx.restore();
+      const imageData = scanCtx.getImageData(0, 0, scanCanvas.width, scanCanvas.height);
+      const code = jsQR(imageData.data, scanCanvas.width, scanCanvas.height, { inversionAttempts: "dontInvert" });
+      if (code) {
+        // location: topLeftCorner, topRightCorner, bottomRightCorner, bottomLeftCorner
+        state.qrBox = {
+          data: code.data,
+          points: [
+            code.location.topLeftCorner,
+            code.location.topRightCorner,
+            code.location.bottomRightCorner,
+            code.location.bottomLeftCorner,
+          ]
+        };
+      } else {
+        state.qrBox = null;
+      }
+    }
+    requestAnimationFrame(scanLoop);
+  }
+
+  // ====== Info ======
+  let infoTimer = null;
+  function info(t) {
+    clearTimeout(infoTimer);
+    msg.textContent = t;
+    msg.style.opacity = '1';
+    infoTimer = setTimeout(()=> msg.style.opacity = '0.0', 2200);
+  }
+
+  // ====== WebRTC (1v1) ======
+  function setupRTC() {
+    const pc = new RTCPeerConnection({
+      iceServers:[{urls:'stun:stun.l.google.com:19302'}]
+    });
+    state.pc = pc;
+    const dc = pc.createDataChannel('rb-ar');
+    state.dc = dc;
+
+    dc.onopen = ()=> { state.connected = true; info('상태: 연결됨'); sendState(); };
+    dc.onclose = ()=> { state.connected = false; info('상태: 연결 끊김'); };
+
+    pc.onicecandidate = (e)=> {
+      if (!e.candidate) {
+        if (pc.localDescription?.type === 'offer') offerOut.value = btoa(JSON.stringify(pc.localDescription));
+        if (pc.localDescription?.type === 'answer') answerOut.value = btoa(JSON.stringify(pc.localDescription));
+      }
     };
 
-    const video = document.getElementById('cam');
-    const hud = document.getElementById('hud');
-    const ctx = hud.getContext('2d', { alpha: true });
-    const ammoEl = document.getElementById('ammo');
-    const hpEl = document.getElementById('hp');
-    const fireBtn = document.getElementById('fireBtn');
-    const muzzle = document.getElementById('muzzle');
-    const hitFx = document.getElementById('hitFx');
-    const msg = document.getElementById('msg');
+    pc.ondatachannel = (e)=> {
+      state.dc = e.channel;
+      state.dc.onopen = ()=> { state.connected = true; info('상태: 연결됨'); sendState(); };
+      state.dc.onmessage = onMessage;
+      state.dc.onclose = ()=> { state.connected = false; info('상태: 연결 끊김'); };
+    };
 
-    // ---- Camera ----
-    async function startCamera() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'environment' }, audio: false
-        });
-        video.srcObject = stream;
-        await video.play();
-        resize();
-        info('카메라 준비 완료');
-      } catch (e) {
-        info('카메라 접근 실패: 권한/HTTPS 필요. (잘 모르겠습니다: 기기별 정책차)');
-        console.error(e);
+    state.dc.onmessage = onMessage;
+
+    // 미디어 송출은 안 함(데이터만)
+  }
+
+  function send(obj) {
+    if (state.dc && state.dc.readyState === 'open') {
+      state.dc.send(JSON.stringify(obj));
+    }
+  }
+
+  function onMessage(ev) {
+    try {
+      const msg = JSON.parse(ev.data);
+      if (msg.t === 'hit') {
+        // 상대가 나를 맞췄다고 알림
+        state.hp = Math.max(0, state.hp - (msg.amt||20));
+        updateHUDText();
+        info(`피격! by ${msg.by||'Enemy'}`);
+        screenHitFlash();
+        if (state.hp <= 0) info('사망... 게임 오버');
+        // 내 HP 상태 알려주기
+        sendState();
+      } else if (msg.t === 'state') {
+        remoteHpEl.textContent = msg.hp ?? '?';
+      } else if (msg.t === 'fire') {
+        // 연출: 상대 발사 알림 필요시 추가 가능
+      } else if (msg.t === 'msg') {
+        info(msg.text||'');
       }
-    }
+    } catch (e) {}
+  }
 
-    // ---- Resize ----
-    function resize() {
-      hud.width = innerWidth;
-      hud.height = innerHeight;
-    }
-    addEventListener('resize', resize);
+  function sendState() {
+    send({ t:'state', name: nameInput.value || 'Player', hp: state.hp });
+  }
 
-    // ---- Wake Lock (화면 꺼짐 방지) ----
-    async function keepAwake(on) {
-      try {
-        if (on && 'wakeLock' in navigator) {
-          state.wakeLock = await navigator.wakeLock.request('screen');
-        } else if (state.wakeLock) {
-          state.wakeLock.release(); state.wakeLock = null;
-        }
-      } catch (_) { /* 기기별 미지원 가능 */ }
-    }
+  // UI wire-up for RTC
+  btnCreateOffer.onclick = async ()=> {
+    setupRTC();
+    const pc = state.pc;
+    await pc.setLocalDescription(await pc.createOffer());
+    info('Offer 생성 완료. 복사해서 전달하세요.');
+  };
+  btnCopyOffer.onclick = ()=> { offerOut.select(); document.execCommand('copy'); info('Offer 복사됨'); };
 
-    // ---- Simple SFX (WebAudio) ----
-    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    function playShot() {
-      const o = audioCtx.createOscillator();
-      const g = audioCtx.createGain();
-      o.type = 'square'; o.frequency.value = 220;
-      g.gain.setValueAtTime(0.001, audioCtx.currentTime);
-      g.gain.exponentialRampToValueAtTime(0.6, audioCtx.currentTime + 0.01);
-      g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.15);
-      o.connect(g).connect(audioCtx.destination);
-      o.start(); o.stop(audioCtx.currentTime + 0.16);
-    }
-    function playReload() {
-      const o = audioCtx.createOscillator();
-      const g = audioCtx.createGain();
-      o.type = 'triangle'; o.frequency.value = 600;
-      g.gain.setValueAtTime(0.001, audioCtx.currentTime);
-      g.gain.exponentialRampToValueAtTime(0.3, audioCtx.currentTime + 0.02);
-      g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.25);
-      o.connect(g).connect(audioCtx.destination);
-      o.start(); o.stop(audioCtx.currentTime + 0.26);
-    }
+  btnCreateAnswer.onclick = async ()=> {
+    const s = offerIn.value.trim();
+    if (!s) { info('Remote Offer 붙여넣기 필요'); return; }
+    try {
+      const offer = JSON.parse(atob(s));
+      setupRTC();
+      await state.pc.setRemoteDescription(offer);
+      await state.pc.setLocalDescription(await state.pc.createAnswer());
+      info('Answer 생성 완료. 복사해서 호스트에게 전달하세요.');
+    } catch (e) { info('Offer 파싱 실패'); }
+  };
+  btnCopyAnswer.onclick = ()=> { answerOut.select(); document.execCommand('copy'); info('Answer 복사됨'); };
 
-    // ---- Shooting / Reload ----
-    function updateAmmo() { ammoEl.textContent = state.ammo; hpEl.textContent = state.hp; }
-    function muzzleFlash() {
-      muzzle.style.transition = 'none';
-      muzzle.style.opacity = '1'; muzzle.style.transform = 'scale(1.0)';
-      requestAnimationFrame(() => {
-        muzzle.style.transition = 'opacity .12s ease, transform .12s ease';
-        muzzle.style.opacity = '0'; muzzle.style.transform = 'scale(1.4)';
-      });
-    }
-    function screenHitFlash() {
-      hitFx.style.opacity = '1';
-      setTimeout(()=> hitFx.style.opacity = '0', 120);
-    }
-    function fire() {
-      const now = performance.now();
-      if (now - state.lastShot < 120) return; // rate limit
-      if (state.reloading) return;
-      if (state.ammo <= 0) { info('탄약 없음! 위로 스와이프=장전'); return; }
-      state.ammo--; updateAmmo();
-      state.lastShot = now;
-      playShot(); muzzleFlash(); screenHitFlash();
-      checkHit();
-    }
-    function reload() {
-      if (state.reloading) return;
-      state.reloading = true;
-      info('장전 중...');
-      setTimeout(()=>{
-        state.ammo = state.clip; state.reloading = false; updateAmmo();
-        playReload(); info('장전 완료');
-      }, 800);
-    }
+  btnSetRemoteAnswer.onclick = async ()=> {
+    const s = answerIn.value.trim();
+    if (!s) { info('Remote Answer 붙여넣기 필요'); return; }
+    try {
+      const answer = JSON.parse(atob(s));
+      await state.pc.setRemoteDescription(answer);
+      info('원격 Answer 설정 완료. 연결을 기다립니다...');
+    } catch (e) { info('Answer 파싱 실패'); }
+  };
 
-    // ---- Gesture: tap to fire, swipe up to reload ----
-    let touchStartY = 0;
-    addEventListener('touchstart', (e)=>{
-      if (e.target === fireBtn) return;
-      touchStartY = e.touches[0].clientY;
-    }, {passive:true});
-    addEventListener('touchend', (e)=>{
-      const endY = (e.changedTouches[0]||{}).clientY || 0;
-      if (touchStartY - endY > 60) reload(); else fire();
-    });
-    fireBtn.addEventListener('click', fire);
+  toggleConnect.onclick = ()=> { connectPanel.hidden = !connectPanel.hidden; };
 
-    // ---- Volume buttons -> fire (가능 기기 한정, 잘 모르겠습니다) ----
-    // 일부 브라우저는 볼륨키 이벤트 접근 불가. 미지원일 수 있습니다.
+  // 좌우반전 토글
+  flipX.onchange = ()=> {
+    if (flipX.checked) { video.classList.add('flipX'); } else { video.classList.remove('flipX'); }
+  };
 
-    // ---- QR detection (BarcodeDetector) ----
-    let detector = null;
-    async function setupBarcode() {
-      if (!state.supportsBarcode) { info('QR 감지 미지원(브라우저)'); return; }
-      try {
-        detector = new BarcodeDetector({ formats: ['qr_code'] });
-        info('QR 감지 활성화');
-      } catch (e) {
-        info('QR 감지 초기화 실패(잘 모르겠습니다: 기기/권한 차)'); console.warn(e);
-      }
-    }
+  // ====== Init ======
+  (async function init(){
+    await startCamera();
+    keepAwake(true);
+    resize();
+    drawHUD();
+    scanLoop();
+    updateHUDText();
+    const kick = ()=> { audioCtx.resume?.(); removeEventListener('touchend', kick); };
+    addEventListener('touchend', kick, {once:true});
+  })();
 
-    // ---- Draw HUD & QR boxes ----
-    function drawHUD() {
-      ctx.clearRect(0,0,hud.width,hud.height);
-      // 조준선 간단 라인
-      const cx = hud.width/2, cy = hud.height/2;
-      ctx.globalAlpha = 0.8;
-      ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(255,255,255,.7)';
-      ctx.beginPath();
-      ctx.moveTo(cx-40, cy); ctx.lineTo(cx-14, cy);
-      ctx.moveTo(cx+14, cy); ctx.lineTo(cx+40, cy);
-      ctx.moveTo(cx, cy-40); ctx.lineTo(cx, cy-14);
-      ctx.moveTo(cx, cy+14); ctx.lineTo(cx, cy+40);
-      ctx.stroke();
-
-      // QR 박스 그리기
-      state.qrTargets.forEach(b => {
-        // 비디오 좌표계 -> 뷰포트 좌표 추정 (단순 스케일 가정, 추측입니다)
-        const x = b.boundingBox.x * (hud.width / video.videoWidth);
-        const y = b.boundingBox.y * (hud.height / video.videoHeight);
-        const w = b.boundingBox.width * (hud.width / video.videoWidth);
-        const h = b.boundingBox.height * (hud.height / video.videoHeight);
-        ctx.strokeStyle = 'rgba(0,255,136,.9)'; ctx.setLineDash([6,4]);
-        ctx.lineWidth = 3; ctx.strokeRect(x,y,w,h);
-        ctx.setLineDash([]);
-        ctx.font = '12px system-ui'; ctx.fillStyle='rgba(0,255,136,.9)';
-        ctx.fillText(b.rawValue || 'QR', x+4, y-6);
-      });
-      requestAnimationFrame(drawHUD);
-    }
-
-    // ---- Hit test: crosshair center in QR box? ----
-    function checkHit() {
-      if (!state.qrTargets.length) return;
-      const cx = hud.width/2, cy = hud.height/2;
-      for (const b of state.qrTargets) {
-        const x = b.boundingBox.x * (hud.width / video.videoWidth);
-        const y = b.boundingBox.y * (hud.height / video.videoHeight);
-        const w = b.boundingBox.width * (hud.width / video.videoWidth);
-        const h = b.boundingBox.height * (hud.height / video.videoHeight);
-        if (cx >= x && cx <= x+w && cy >= y && cy <= y+h) {
-          // 맞춤!
-          info(`HIT! (${b.rawValue || 'QR'})`);
-          // 상대 체력 깎이는 로직은 네트워크 연동 시 구현
-          break;
-        }
-      }
-    }
-
-    // ---- QR scan loop ----
-    async function scanLoop() {
-      if (!detector || video.readyState < 2) { requestAnimationFrame(scanLoop); return; }
-      try {
-        const faces = await detector.detect(video);
-        state.qrTargets = faces;
-      } catch (e) {
-        // 스캔 실패는 무시(성능/권한 이슈 가능)
-      } finally {
-        requestAnimationFrame(scanLoop);
-      }
-    }
-
-    // ---- Utility ----
-    let infoTimer = null;
-    function info(t) {
-      clearTimeout(infoTimer);
-      msg.textContent = t;
-      msg.style.opacity = '1';
-      infoTimer = setTimeout(()=> msg.style.opacity = '0.0', 2000);
-    }
-
-    // ---- Init ----
-    (async function init(){
-      await startCamera();
-      await setupBarcode();
-      keepAwake(true);
-      drawHUD();
-      scanLoop();
-      updateAmmo();
-      // 화면 탭 첫 입력 때 오디오 컨텍스트 깨우기
-      const kick = ()=> { audioCtx.resume?.(); removeEventListener('touchend', kick); };
-      addEventListener('touchend', kick, {once:true});
-    })();
-
-    // 정리
-    addEventListener('pagehide', ()=> keepAwake(false));
+  addEventListener('pagehide', ()=> keepAwake(false));
   </script>
 </body>
 </html>
