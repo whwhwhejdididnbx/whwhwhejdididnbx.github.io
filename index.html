@@ -7,110 +7,83 @@
 body { text-align:center; font-family:sans-serif; }
 #status { margin:10px; font-weight:bold; }
 #health { font-size:20px; color:red; }
-textarea { width: 90%; height: 60px; }
+button { font-size:16px; padding:5px 10px; margin:5px; }
 </style>
 </head>
 <body>
 <h1>현실판 배그 P2P</h1>
 
 <div>
-<button id="hostBtn">호스트 생성</button>
-<button id="joinBtn">참가</button>
-</div>
-
-<div>
-<h3>호스트 Offer (복사 후 친구에게 전달)</h3>
-<textarea id="offer"></textarea>
-<h3>답변 Answer (친구가 입력)</h3>
-<textarea id="answer"></textarea>
-<button id="setAnswerBtn">Answer 설정</button>
+<p id="myId">방 코드: ...</p>
+<input id="friendId" placeholder="친구 방 코드 입력">
+<button id="connectBtn">친구 연결</button>
 </div>
 
 <div id="status">상태: 대기중</div>
 <div>내 체력: <span id="health">100</span></div>
+<button onclick="shoot()">발사</button>
 
+<script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
 <script>
-let pc;
-let dc;
 let health = 100;
-let lastShake = 0;
-
+let conn;
 const statusDiv = document.getElementById("status");
 const healthSpan = document.getElementById("health");
 
 function log(msg){ statusDiv.innerText = "상태: "+msg; }
 
-function setupDataChannel(channel){
-    dc = channel;
-    dc.onopen = ()=>log("연결됨! 총 발사 준비 완료");
-    dc.onmessage = e=>{
-        const data = JSON.parse(e.data);
-        if(data.type==="shoot"){
+// PeerJS 생성
+const myPeer = new Peer(); // PeerJS 무료 클라우드 서버 사용
+
+myPeer.on('open', id => {
+    document.getElementById('myId').innerText = "방 코드: " + id;
+    log("대기중. 친구에게 방 코드 공유하세요.");
+});
+
+// 친구 연결 버튼
+document.getElementById('connectBtn').onclick = () => {
+    const peerId = document.getElementById('friendId').value;
+    if(!peerId){ alert("친구 방 코드 입력!"); return; }
+    conn = myPeer.connect(peerId);
+    setupConnection();
+};
+
+// 친구가 나에게 연결 시
+myPeer.on('connection', connection => {
+    conn = connection;
+    setupConnection();
+});
+
+// 연결 설정
+function setupConnection(){
+    conn.on('open', () => log("연결 완료! 총 발사 준비 완료"));
+    conn.on('data', data => {
+        if(data.type === 'shoot'){
             health -= 10;
             if(health<0) health=0;
             healthSpan.innerText = health;
             log("총 맞음! 내 체력:"+health);
         }
-    };
+    });
 }
 
-document.getElementById("hostBtn").onclick = async ()=>{
-    pc = new RTCPeerConnection();
-    const channel = pc.createDataChannel("game");
-    setupDataChannel(channel);
+// 총 발사 함수
+function shoot(){
+    if(conn && conn.open){
+        conn.send({type:'shoot'});
+        log("발사! 상대에게 신호 전송");
+    } else {
+        log("아직 연결되지 않음");
+    }
+}
 
-    pc.onicecandidate = e=>{
-        if(e.candidate) console.log("ICE 후보:", JSON.stringify(e.candidate));
-    };
-
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    document.getElementById("offer").value = JSON.stringify(offer);
-
-    pc.ondatachannel = e=>setupDataChannel(e.channel);
-    log("호스트 Offer 생성됨. 친구에게 전달하세요.");
-};
-
-document.getElementById("joinBtn").onclick = async ()=>{
-    pc = new RTCPeerConnection();
-    pc.ondatachannel = e=>setupDataChannel(e.channel);
-    pc.onicecandidate = e=>{
-        if(e.candidate) console.log("ICE 후보:", JSON.stringify(e.candidate));
-    };
-
-    const offer = JSON.parse(document.getElementById("offer").value);
-    await pc.setRemoteDescription(offer);
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    document.getElementById("answer").value = JSON.stringify(answer);
-    log("참가 완료. 호스트에게 Answer 전달하세요.");
-};
-
-document.getElementById("setAnswerBtn").onclick = async ()=>{
-    const answer = JSON.parse(document.getElementById("answer").value);
-    await pc.setRemoteDescription(answer);
-    log("연결 완료!");
-};
-
-// 흔들기 감지 -> 총 발사
+// 핸드폰 흔들기 감지로 발사
 window.addEventListener('devicemotion', e=>{
     const acc = e.accelerationIncludingGravity;
+    if(!acc) return;
     const mag = Math.sqrt(acc.x*acc.x + acc.y*acc.y + acc.z*acc.z);
-    if(mag>20 && Date.now()-lastShake>1000){
-        shoot();
-        lastShake = Date.now();
-    }
+    if(mag>20) shoot();
 });
-
-// 터치 -> 총 발사
-document.body.addEventListener("touchstart", shoot);
-
-function shoot(){
-    if(dc && dc.readyState==="open"){
-        dc.send(JSON.stringify({type:"shoot"}));
-        log("발사! 상대에게 신호 보냄");
-    }
-}
 </script>
 </body>
 </html>
